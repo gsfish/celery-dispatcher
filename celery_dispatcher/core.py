@@ -249,12 +249,12 @@ class dispatch(LoggerMixin, threading.local):
         self.logger.info('Finished dispatching')
 
     def _apply_tasks(self, tasks, **options) -> Iterator[AsyncResult]:
-        options = options.copy()
         with current_app.producer_or_acquire() as producer:
             for yield_task in tasks:
-                task, args, kwargs, _options = self._parse_yield_task(yield_task)
-                options.update(_options)
-                result = task.apply_async(args=args, kwargs=kwargs, producer=producer, add_to_parent=False, **options)
+                task, args, kwargs, task_options = self._parse_yield_task(yield_task)
+                _options = options.copy()
+                _options.update(task_options)
+                result = task.apply_async(args=args, kwargs=kwargs, producer=producer, add_to_parent=False, **_options)
                 task_id = result.task_id
                 self.logger.debug('Task %s applied', task_id)
                 yield result

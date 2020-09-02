@@ -14,10 +14,10 @@ jobs:
       with:
         python-version: 3.6
     - name: Upgrade building tools
-        run: >-
-          python3 -m
-          pip install --user --upgrade
-          setuptools wheel
+      run: >-
+        python3 -m
+        pip install --user --upgrade
+        setuptools wheel
     - name: Build a binary wheel and a source tarball
       run: >-
         python3

@@ -15,7 +15,7 @@ jobs:
         python-version: 3.6
     - name: Build a binary wheel and a source tarball
       run: >-
-        python
+        python3
         setup.py
         sdist
         bdist_wheel

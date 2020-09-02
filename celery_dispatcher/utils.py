@@ -4,6 +4,8 @@ from reprlib import repr
 from itertools import islice, chain
 from sys import getsizeof, stderr
 
+REGEX_UUID = r'[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}'
+
 
 def gen_chunk(it, size):
     while True:
@@ -56,8 +58,7 @@ def total_size(o, handlers={}, verbose=False):
 
 
 def is_uuid_format(value: str) -> bool:
-    pattern = r'[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}'
-    if value and re.match(pattern, value):
+    if value and re.match(REGEX_UUID, value):
         return True
     else:
         return False

@@ -153,7 +153,7 @@ class dispatch(LoggerMixin, threading.local):
         # initialize dispatching
         progress_update_frequency = current_app.conf.get('dispatcher_progress_update_frequency', 1)
         self._progress_manager = ProgressManager(progress_update_frequency)
-        self._dispatch_finished = threading.Event()
+        self._stashing_finish_event = threading.Event()
         self._backend = None  # set in _create_task_wrapper
 
         if len(args) == 1 and callable(args[0]):
@@ -228,33 +228,33 @@ class dispatch(LoggerMixin, threading.local):
         # self._handle_results(results, self.receive_result)
 
         self._progress_manager.init_progress()
-        self._dispatch_finished.clear()
+        self._stashing_finish_event.clear()
         self.logger.info('Start dispatching')
 
         dispatch_thread = TaskThread(
-            target=self._store_subtask_results,
-            args=(self._progress_manager, self._dispatch_finished, tasks,),
+            target=self._stash_subtask_results,
+            args=(self._progress_manager, self._stashing_finish_event, tasks,),
             kwargs=options)
         dispatch_thread.start()
         self.logger.debug('Dispatching subtasks: %r, options: %r', tasks, options)
 
-    def _store_subtask_results(self, progress_manager, dispatch_finished, tasks, **options):
+    def _stash_subtask_results(self, progress_manager, finish_event, tasks, **options):
         for results in gen_chunk(self._apply_tasks(tasks, **options), self._batch_size):
             self.logger.debug('%s tasks have been applied', len(results))
             progress_manager.update_progress_total(len(results))
             self._backend.bulk_push(self._dispatch_key, map(lambda r: r.task_id, results), self._result_expires)
 
         time.sleep(0)
-        dispatch_finished.set()
+        finish_event.set()
         self.logger.info('Finished dispatching')
 
-    def _apply_tasks(self, tasks, **options) -> Iterator[AsyncResult]:
+    def _apply_tasks(self, tasks, **common_options) -> Iterator[AsyncResult]:
         with current_app.producer_or_acquire() as producer:
             for task_info in tasks:
                 task, args, kwargs, task_options = self._parse_task_info(task_info)
-                _options = options.copy()
-                _options.update(task_options)
-                result = task.apply_async(args=args, kwargs=kwargs, producer=producer, add_to_parent=False, **_options)
+                options = common_options.copy()
+                options.update(task_options)
+                result = task.apply_async(args=args, kwargs=kwargs, producer=producer, add_to_parent=False, **options)
                 task_id = result.task_id
                 self.logger.debug('Task %s applied', task_id)
                 yield result
@@ -283,7 +283,7 @@ class dispatch(LoggerMixin, threading.local):
 
     def _collect_from_task(self, receiver, auto_ignore: bool = True):
         self.logger.info('Start collecting')
-        for result in self._gen_sub_result():
+        for result in self._restore_subtask_result():
             try:
                 self._handle_results(result, receiver, auto_ignore=auto_ignore)
             except CeleryTimeoutError:
@@ -291,11 +291,11 @@ class dispatch(LoggerMixin, threading.local):
 
         self.logger.info('Finished collecting')
 
-    def _gen_sub_result(self, interval=0.5) -> Iterator[AsyncResult]:
+    def _restore_subtask_result(self, interval=0.5) -> Iterator[AsyncResult]:
         while True:
             task_id = self._backend.pop(self._dispatch_key)
             if not task_id:
-                if self._dispatch_finished.is_set():
+                if self._stashing_finish_event.is_set():
                     return
                 time.sleep(interval)
                 continue

@@ -10,7 +10,7 @@ pip install celery-dispatcher
 
 ## Usage
 
-> NOTICE: celery-dispatcher use tls to store running info, so the pool implementation using coroutines(like eventlet/gevent) can not be used
+> NOTICE: `celery-dispatcher` use tls to store running info, so the pool implementation using coroutines(like eventlet/gevent) can not be used
 
 Fistly, yield subtask and its parameters in the main task by following order:
 
@@ -60,3 +60,31 @@ def calc():
     for i in range(10):
         yield sqrt, (i,)
 ```
+
+## General settings
+
+### dispatcher_result_backend
+
+Default: No result backend enabled by default.
+
+The backend used to store subtask info. Can be one of the following:
+
+- redis: Use [Redis](https://redis.io/) to store the results. See [Redis backend settings](https://docs.celeryproject.org/en/stable/userguide/configuration.html#conf-redis-result-backend).
+
+### dispatcher_batch_size
+
+Default: 1000
+
+The batch size of subtask dispatching, or the result retrieving.
+
+### dispatcher_subtask_timeout
+
+Default: 3600
+
+The default timeout in seconds before `celery-dispatcher` gives up retrieving the result of each subtask.
+
+### dispatcher_progress_update_frequency
+
+Default: 1
+
+The number of steps to record. `celery-dispatcher` only actually store the updated progress in the background at most every N steps.

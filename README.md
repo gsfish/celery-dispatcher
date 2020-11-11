@@ -1,6 +1,6 @@
 # celery-dispatcher
 
-An extension for celery to dispatch a large amount of sub-tasks within a main task, and process the results separately. 
+An extension for celery to dispatch large amount of subtasks within a main task, and process the results separately.
 
 ## Installation
 
@@ -12,12 +12,12 @@ pip install celery-dispatcher
 
 > NOTICE: `celery-dispatcher` use tls to store running info, so the pool implementation using coroutines(like eventlet/gevent) can not be used
 
-Fistly, yield subtask and its parameters in the main task by following order:
+Fistly, yield subtask and its parameters in tuple from the main task by following order:
 
-1. task: signature
-2. args: tupple/list
-3. kwargs: dict
-4. options: dict
+1. `task`: signature
+2. `args`: tupple/list
+3. `kwargs`: dict
+4. `options`: dict
 
 Then register the result handler for each subtask using signal:
 
@@ -61,6 +61,15 @@ def calc():
         yield sqrt, (i,)
 ```
 
+## Options
+
+The `dispatch` accepts the following parameters:
+
+- `options`: dict
+- `receiver`: callable
+- `backend`: str
+- `auto_ignore`: bool
+
 ## General settings
 
 ### dispatcher_result_backend
@@ -76,6 +85,12 @@ The backend used to store subtask info. Can be one of the following:
 Default: 1000
 
 The batch size of subtask dispatching, or the result retrieving.
+
+### dispatcher_poll_size
+
+Default: 1000
+
+The queue size of subtasks in result retrieving. `celery-dispatcher` put the unfinished subtasks into a queue, polling it continuously for completion of subtasks.
 
 ### dispatcher_subtask_timeout
 

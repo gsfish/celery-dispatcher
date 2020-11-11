@@ -3,6 +3,8 @@ import time
 
 from datetime import timedelta
 from functools import wraps, update_wrapper, partial
+from queue import PriorityQueue, Full, Empty
+from threading import Lock
 from typing import Iterator, Generator
 
 from celery import _state, current_app, current_task, group
@@ -145,6 +147,7 @@ class dispatch(LoggerMixin, threading.local):
         # initialize configuration
         self._result_backend = current_app.conf.get('dispatcher_result_backend')
         self._batch_size = current_app.conf.get('dispatcher_batch_size', 1000)
+        self._poll_size = current_app.conf.get('dispatcher_poll_size', 1000)
         self._subtask_timeout = current_app.conf.get('dispatcher_subtask_timeout', 60*60)
         self._result_expires = current_app.conf.get('result_expires')
         if isinstance(self._result_expires, timedelta):
@@ -188,10 +191,12 @@ class dispatch(LoggerMixin, threading.local):
                 if not isinstance(gen_task, Generator):
                     raise RuntimeError('Task should be generator: {0!r}'.format(task))
 
-                dispatch_finished = threading.Event()
-                self._dispatch_from_task(dispatch_finished, gen_task, **options)
+                self._progress_manager.init_progress()
+                stash_finished = threading.Event()
+
+                self._dispatch_from_task(stash_finished, gen_task, **options)
                 # start collecting
-                self._collect_from_task(dispatch_finished, receiver)
+                self._collect_from_task(stash_finished, receiver)
 
             return wrapped_task
 
@@ -212,7 +217,7 @@ class dispatch(LoggerMixin, threading.local):
         root_id = current_task.request.root_id
         return 'celery-task-meta-{0}:subtask'.format(root_id)
 
-    def _dispatch_from_task(self, finished, *tasks, **options):
+    def _dispatch_from_task(self, stash_finished, *tasks, **options):
         if len(tasks) == 1:
             tasks = tasks[0]
 
@@ -230,24 +235,23 @@ class dispatch(LoggerMixin, threading.local):
         # results = group(task for task in tasks)(**options)
         # self._handle_result(results, self.receive_result)
 
-        self._progress_manager.init_progress()
         self.logger.info('Start dispatching')
 
-        dispatch_thread = TaskThread(
+        stash_thread = TaskThread(
             target=self._stash_subtask_results,
-            args=(self._progress_manager, finished, tasks,),
+            args=(self._progress_manager, stash_finished, tasks,),
             kwargs=options)
-        dispatch_thread.start()
+        stash_thread.start()
         self.logger.debug('Dispatching subtasks: %r, options: %r', tasks, options)
 
-    def _stash_subtask_results(self, progress_manager, finished, tasks, **options):
+    def _stash_subtask_results(self, progress_manager, stash_finished, tasks, **options):
         for results in gen_chunk(self._apply_tasks(tasks, **options), self._batch_size):
             self.logger.debug('%s tasks have been applied', len(results))
             progress_manager.update_progress_total(len(results))
             self._backend.bulk_push(self._dispatch_key, map(lambda r: r.task_id, results), self._result_expires)
 
         time.sleep(0)
-        finished.set()
+        stash_finished.set()
         self.logger.info('Finished dispatching')
 
     def _apply_tasks(self, tasks, **common_options) -> Iterator[AsyncResult]:
@@ -283,31 +287,67 @@ class dispatch(LoggerMixin, threading.local):
 
         return task, args, kwargs, options
 
-    def _collect_from_task(self, dispatch_finished, receiver):
+    def _collect_from_task(self, stash_finished, receiver):
         self.logger.info('Start collecting')
-        for result in self._restore_subtask_result(dispatch_finished):
-            try:
-                self._handle_result(result, receiver)
-            except CeleryTimeoutError:
-                self.logger.exception('Results timeout expired, task_id: %s', result.task_id)
+
+        restore_finished = threading.Event()
+        handle_lock = Lock()
+        result_queue = PriorityQueue(self._poll_size)
+
+        restore_thread = TaskThread(
+            target=self._restore_subtask_results,
+            args=(stash_finished, restore_finished, handle_lock, result_queue))
+        restore_thread.start()
+
+        while True:
+            if result_queue.empty() and restore_finished.is_set():
+                break
+
+            with handle_lock:
+                try:
+                    priority, result = result_queue.get(False)
+                except Empty:
+                    continue
+
+                timeout = self._subtask_timeout if restore_finished.is_set() else 1
+                try:
+                    self._handle_result(result, receiver, timeout=timeout)
+                except CeleryTimeoutError:
+                    if restore_finished.is_set():
+                        self.logger.debug('Results timeout expired, task_id: %s', result.task_id)
+                        self._progress_manager.update_progress_completed()
+                    else:
+                        result_queue.put((priority+10, result))
 
         self.logger.info('Finished collecting')
 
-    def _restore_subtask_result(self, dispatch_finished, interval=0.5) -> Iterator[AsyncResult]:
+    def _restore_subtask_results(self, stash_finished, restore_finished, handle_lock, result_queue, interval=0.5):
         while True:
             task_id = self._backend.pop(self._dispatch_key)
             if not task_id:
-                if dispatch_finished.is_set():
-                    return
+                if stash_finished.is_set():
+                    break
+
                 time.sleep(interval)
                 continue
+
             result = current_app.AsyncResult(task_id.decode('utf-8'))
-            yield result
+
+            while True:
+                try:
+                    with handle_lock:
+                        result_queue.put((time.time(), result), False)
+                except Full:
+                    time.sleep(interval)
+                    continue
+                else:
+                    break
+
+        restore_finished.set()
 
     def _handle_result(self, result, receiver, other_worker=False, timeout=None, interval=0.5, on_interval=None,
                        propagate=False, disable_sync_subtasks=False):
         callback = partial(self._on_task_finished, receiver=receiver)
-        timeout = timeout or self._subtask_timeout
         self.logger.debug('Waiting for the result, task_id: %s, timeout: %s', result, timeout)
         if other_worker:
             self.logger.debug('Task is not ready on other worker, task_id: %s', result.task_id)

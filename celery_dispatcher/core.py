@@ -153,8 +153,8 @@ class dispatch(LoggerMixin, threading.local):
         # initialize dispatching
         progress_update_frequency = current_app.conf.get('dispatcher_progress_update_frequency', 1)
         self._progress_manager = ProgressManager(progress_update_frequency)
-        self._stashing_finish_event = threading.Event()
         self._backend = None  # set in _create_task_wrapper
+        self._auto_ignore = True
 
         if len(args) == 1 and callable(args[0]):
             self._wrapped_directly = True
@@ -179,7 +179,7 @@ class dispatch(LoggerMixin, threading.local):
             self._wrapped_task = self._wrapper(task)
             return self._wrapped_task
 
-    def _create_task_wrapper(self, options=None, receiver=None, backend=None):
+    def _create_task_wrapper(self, options=None, receiver=None, backend=None, auto_ignore=True):
         def wrapper(task):
             @wraps(task)
             def wrapped_task(*args, **kwargs):
@@ -188,9 +188,10 @@ class dispatch(LoggerMixin, threading.local):
                 if not isinstance(gen_task, Generator):
                     raise RuntimeError('Task should be generator: {0!r}'.format(task))
 
-                self._dispatch_from_task(gen_task, **options)
+                dispatch_finished = threading.Event()
+                self._dispatch_from_task(dispatch_finished, gen_task, **options)
                 # start collecting
-                self._collect_from_task(receiver, auto_ignore=True)
+                self._collect_from_task(dispatch_finished, receiver)
 
             return wrapped_task
 
@@ -202,6 +203,8 @@ class dispatch(LoggerMixin, threading.local):
         else:
             self._backend = DEFAULT_BACKEND(self._result_backend)
 
+        self._auto_ignore = auto_ignore
+
         return wrapper
 
     @property
@@ -209,7 +212,7 @@ class dispatch(LoggerMixin, threading.local):
         root_id = current_task.request.root_id
         return 'celery-task-meta-{0}:subtask'.format(root_id)
 
-    def _dispatch_from_task(self, *tasks, **options):
+    def _dispatch_from_task(self, finished, *tasks, **options):
         if len(tasks) == 1:
             tasks = tasks[0]
 
@@ -228,24 +231,23 @@ class dispatch(LoggerMixin, threading.local):
         # self._handle_result(results, self.receive_result)
 
         self._progress_manager.init_progress()
-        self._stashing_finish_event.clear()
         self.logger.info('Start dispatching')
 
         dispatch_thread = TaskThread(
             target=self._stash_subtask_results,
-            args=(self._progress_manager, self._stashing_finish_event, tasks,),
+            args=(self._progress_manager, finished, tasks,),
             kwargs=options)
         dispatch_thread.start()
         self.logger.debug('Dispatching subtasks: %r, options: %r', tasks, options)
 
-    def _stash_subtask_results(self, progress_manager, finish_event, tasks, **options):
+    def _stash_subtask_results(self, progress_manager, finished, tasks, **options):
         for results in gen_chunk(self._apply_tasks(tasks, **options), self._batch_size):
             self.logger.debug('%s tasks have been applied', len(results))
             progress_manager.update_progress_total(len(results))
             self._backend.bulk_push(self._dispatch_key, map(lambda r: r.task_id, results), self._result_expires)
 
         time.sleep(0)
-        finish_event.set()
+        finished.set()
         self.logger.info('Finished dispatching')
 
     def _apply_tasks(self, tasks, **common_options) -> Iterator[AsyncResult]:
@@ -281,30 +283,30 @@ class dispatch(LoggerMixin, threading.local):
 
         return task, args, kwargs, options
 
-    def _collect_from_task(self, receiver, auto_ignore: bool = True):
+    def _collect_from_task(self, dispatch_finished, receiver):
         self.logger.info('Start collecting')
-        for result in self._restore_subtask_result():
+        for result in self._restore_subtask_result(dispatch_finished):
             try:
-                self._handle_result(result, receiver, auto_ignore=auto_ignore)
+                self._handle_result(result, receiver)
             except CeleryTimeoutError:
                 self.logger.exception('Results timeout expired, task_id: %s', result.task_id)
 
         self.logger.info('Finished collecting')
 
-    def _restore_subtask_result(self, interval=0.5) -> Iterator[AsyncResult]:
+    def _restore_subtask_result(self, dispatch_finished, interval=0.5) -> Iterator[AsyncResult]:
         while True:
             task_id = self._backend.pop(self._dispatch_key)
             if not task_id:
-                if self._stashing_finish_event.is_set():
+                if dispatch_finished.is_set():
                     return
                 time.sleep(interval)
                 continue
             result = current_app.AsyncResult(task_id.decode('utf-8'))
             yield result
 
-    def _handle_result(self, result, receiver, other_worker=False, auto_ignore=False, timeout=None, interval=0.5,
-                       on_interval=None, propagate=False, disable_sync_subtasks=False):
-        callback = partial(self._on_task_finished, receiver=receiver, auto_ignore=auto_ignore)
+    def _handle_result(self, result, receiver, other_worker=False, timeout=None, interval=0.5, on_interval=None,
+                       propagate=False, disable_sync_subtasks=False):
+        callback = partial(self._on_task_finished, receiver=receiver)
         timeout = timeout or self._subtask_timeout
         self.logger.debug('Waiting for the result, task_id: %s, timeout: %s', result, timeout)
         if other_worker:
@@ -330,7 +332,7 @@ class dispatch(LoggerMixin, threading.local):
         else:
             raise ValueError('Invalid result type: {0!r}'.format(result))
 
-        if auto_ignore:
+        if self._auto_ignore:
             result.forget()
 
     def _wait_until_ready(self, result, timeout=None, interval=0.5):
@@ -341,21 +343,21 @@ class dispatch(LoggerMixin, threading.local):
                 raise TimeoutError('Failed to wait for the result, task_id: %s', result.task_id)
             time.sleep(interval)
 
-    def _on_task_finished(self, task_id, value, receiver, auto_ignore=False):
+    def _on_task_finished(self, task_id, value, receiver):
         if isinstance(value, Exception):
             self.logger.error('Failed to save result, task_id: %s', task_id, exc_info=value)
 
         elif isinstance(value, GroupResult):
             self.logger.debug('Received GroupResult, task_id: %s', task_id)
             self._progress_manager.update_progress_total(len(value))
-            self._handle_result(value, receiver=receiver, auto_ignore=auto_ignore)
+            self._handle_result(value, receiver=receiver)
 
         elif self._is_groupresult_meta(value):
             self.logger.debug('Received GroupResult META, task_id: %s', task_id)
             for results in gen_chunk(self._gen_result_from_groupresult_meta(value), self._batch_size):
                 self._progress_manager.update_progress_total(len(results))
                 for result in results:
-                    self._handle_result(result, receiver=receiver, other_worker=True, auto_ignore=auto_ignore)
+                    self._handle_result(result, receiver=receiver, other_worker=True)
 
         else:
             self.logger.debug('Received common result, task_id: %s, size: %d bytes', task_id, total_size(value))

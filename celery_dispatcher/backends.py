@@ -30,4 +30,4 @@ class RedisBackend:
         return self.conn.rpop(key)
 
 
-default_backend = RedisBackend
+DEFAULT_BACKEND = RedisBackend

@@ -10,7 +10,7 @@ from celery.exceptions import TimeoutError as CeleryTimeoutError
 from celery.result import AsyncResult, GroupResult, ResultSet
 from celery.utils.abstract import CallableSignature, CallableTask
 
-from .backends import default_backend
+from .backends import DEFAULT_BACKEND
 from .mixins import LoggerMixin
 from .states import PROGRESS
 from .signals import subtask_success
@@ -200,7 +200,7 @@ class dispatch(LoggerMixin, threading.local):
         if backend:
             self._backend = backend(self._result_backend)
         else:
-            self._backend = default_backend(self._result_backend)
+            self._backend = DEFAULT_BACKEND(self._result_backend)
 
         return wrapper
 
@@ -225,7 +225,7 @@ class dispatch(LoggerMixin, threading.local):
         # `group.tasks` and `GroupResult`
         #
         # results = group(task for task in tasks)(**options)
-        # self._handle_results(results, self.receive_result)
+        # self._handle_result(results, self.receive_result)
 
         self._progress_manager.init_progress()
         self._stashing_finish_event.clear()
@@ -285,7 +285,7 @@ class dispatch(LoggerMixin, threading.local):
         self.logger.info('Start collecting')
         for result in self._restore_subtask_result():
             try:
-                self._handle_results(result, receiver, auto_ignore=auto_ignore)
+                self._handle_result(result, receiver, auto_ignore=auto_ignore)
             except CeleryTimeoutError:
                 self.logger.exception('Results timeout expired, task_id: %s', result.task_id)
 
@@ -302,25 +302,25 @@ class dispatch(LoggerMixin, threading.local):
             result = current_app.AsyncResult(task_id.decode('utf-8'))
             yield result
 
-    def _handle_results(self, results, receiver, other_worker=False, auto_ignore=False, timeout=None, interval=0.5,
-                        on_interval=None, propagate=False, disable_sync_subtasks=False):
+    def _handle_result(self, result, receiver, other_worker=False, auto_ignore=False, timeout=None, interval=0.5,
+                       on_interval=None, propagate=False, disable_sync_subtasks=False):
         callback = partial(self._on_task_finished, receiver=receiver, auto_ignore=auto_ignore)
         timeout = timeout or self._subtask_timeout
-        self.logger.debug('Waiting for the results, task_id: %s, timeout: %s', results, timeout)
+        self.logger.debug('Waiting for the result, task_id: %s, timeout: %s', result, timeout)
         if other_worker:
-            self.logger.debug('Task is not ready on other worker, task_id: %s', results.task_id)
-            self._wait_until_ready(results, timeout)
+            self.logger.debug('Task is not ready on other worker, task_id: %s', result.task_id)
+            self._wait_until_ready(result, timeout)
 
-        if isinstance(results, AsyncResult):
-            result = results.get(
+        if isinstance(result, AsyncResult):
+            value = result.get(
                 timeout=timeout,
                 interval=interval,
                 on_interval=on_interval,
                 propagate=propagate,
                 disable_sync_subtasks=disable_sync_subtasks)
-            callback(results.task_id, result)
-        elif isinstance(results, ResultSet):
-            results.get(
+            callback(result.task_id, value)
+        elif isinstance(result, ResultSet):
+            result.get(
                 callback=callback,
                 timeout=timeout,
                 interval=interval,
@@ -328,10 +328,10 @@ class dispatch(LoggerMixin, threading.local):
                 propagate=propagate,
                 disable_sync_subtasks=disable_sync_subtasks)
         else:
-            raise ValueError('Invalid results type: {0!r}'.format(results))
+            raise ValueError('Invalid result type: {0!r}'.format(result))
 
         if auto_ignore:
-            results.forget()
+            result.forget()
 
     def _wait_until_ready(self, result, timeout=None, interval=0.5):
         time_start = time.monotonic()
@@ -348,14 +348,14 @@ class dispatch(LoggerMixin, threading.local):
         elif isinstance(value, GroupResult):
             self.logger.debug('Received GroupResult, task_id: %s', task_id)
             self._progress_manager.update_progress_total(len(value))
-            self._handle_results(value, receiver=receiver, auto_ignore=auto_ignore)
+            self._handle_result(value, receiver=receiver, auto_ignore=auto_ignore)
 
         elif self._is_groupresult_meta(value):
             self.logger.debug('Received GroupResult META, task_id: %s', task_id)
             for results in gen_chunk(self._gen_result_from_groupresult_meta(value), self._batch_size):
                 self._progress_manager.update_progress_total(len(results))
                 for result in results:
-                    self._handle_results(result, receiver=receiver, other_worker=True, auto_ignore=auto_ignore)
+                    self._handle_result(result, receiver=receiver, other_worker=True, auto_ignore=auto_ignore)
 
         else:
             self.logger.debug('Received common result, task_id: %s, size: %d bytes', task_id, total_size(value))

@@ -144,7 +144,7 @@ class dispatch(LoggerMixin, threading.local):
     def __init__(self, *args, **kwargs):
         # initialize configuration
         self._result_backend = current_app.conf.get('dispatcher_result_backend')
-        self._chunk_size = current_app.conf.get('dispatcher_chunk_size', 1000)
+        self._batch_size = current_app.conf.get('dispatcher_batch_size', 1000)
         self._subtask_timeout = current_app.conf.get('dispatcher_subtask_timeout', 60*60)
         self._result_expires = current_app.conf.get('result_expires')
         if isinstance(self._result_expires, timedelta):
@@ -232,14 +232,14 @@ class dispatch(LoggerMixin, threading.local):
         self.logger.info('Start dispatching')
 
         dispatch_thread = TaskThread(
-            target=self._store_sub_task_results,
+            target=self._store_subtask_results,
             args=(self._progress_manager, self._dispatch_finished, tasks,),
             kwargs=options)
         dispatch_thread.start()
-        self.logger.debug('Dispatching sub-tasks: %r, options: %r', tasks, options)
+        self.logger.debug('Dispatching subtasks: %r, options: %r', tasks, options)
 
-    def _store_sub_task_results(self, progress_manager, dispatch_finished, tasks, **options):
-        for results in gen_chunk(self._apply_tasks(tasks, **options), self._chunk_size):
+    def _store_subtask_results(self, progress_manager, dispatch_finished, tasks, **options):
+        for results in gen_chunk(self._apply_tasks(tasks, **options), self._batch_size):
             self.logger.debug('%s tasks have been applied', len(results))
             progress_manager.update_progress_total(len(results))
             self._backend.bulk_push(self._dispatch_key, map(lambda r: r.task_id, results), self._result_expires)
@@ -250,8 +250,8 @@ class dispatch(LoggerMixin, threading.local):
 
     def _apply_tasks(self, tasks, **options) -> Iterator[AsyncResult]:
         with current_app.producer_or_acquire() as producer:
-            for yield_task in tasks:
-                task, args, kwargs, task_options = self._parse_yield_task(yield_task)
+            for task_info in tasks:
+                task, args, kwargs, task_options = self._parse_task_info(task_info)
                 _options = options.copy()
                 _options.update(task_options)
                 result = task.apply_async(args=args, kwargs=kwargs, producer=producer, add_to_parent=False, **_options)
@@ -259,25 +259,25 @@ class dispatch(LoggerMixin, threading.local):
                 self.logger.debug('Task %s applied', task_id)
                 yield result
 
-    def _parse_yield_task(self, yield_task):
+    def _parse_task_info(self, task_info):
         task = None
         args = ()
         kwargs = {}
         options = {}
-        if isinstance(yield_task, CallableTask):
-            task = yield_task
-        elif isinstance(yield_task, (tuple, list)):
-            if len(yield_task) == 1:
-                task = yield_task[0]
-            elif len(yield_task) == 2:
-                task, args = yield_task
-            elif len(yield_task) == 3:
-                task, args, kwargs = yield_task
-            elif len(yield_task) == 4:
-                task, args, kwargs, options = yield_task
+        if isinstance(task_info, CallableTask):
+            task = task_info
+        elif isinstance(task_info, (tuple, list)):
+            if len(task_info) == 1:
+                task = task_info[0]
+            elif len(task_info) == 2:
+                task, args = task_info
+            elif len(task_info) == 3:
+                task, args, kwargs = task_info
+            elif len(task_info) == 4:
+                task, args, kwargs, options = task_info
 
         if not task:
-            raise ValueError('Invalid yield task: {0!r}'.format(yield_task))
+            raise ValueError('Invalid task info: {0!r}'.format(task_info))
 
         return task, args, kwargs, options
 
@@ -352,7 +352,7 @@ class dispatch(LoggerMixin, threading.local):
 
         elif self._is_groupresult_meta(value):
             self.logger.debug('Received GroupResult META, task_id: %s', task_id)
-            for results in gen_chunk(self._gen_result_from_groupresult_meta(value), self._chunk_size):
+            for results in gen_chunk(self._gen_result_from_groupresult_meta(value), self._batch_size):
                 self._progress_manager.update_progress_total(len(results))
                 for result in results:
                     self._handle_results(result, receiver=receiver, other_worker=True, auto_ignore=auto_ignore)

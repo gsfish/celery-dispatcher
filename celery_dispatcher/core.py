@@ -346,7 +346,8 @@ class dispatch(LoggerMixin, threading.local):
                 else:
                     break
 
-        restore_finished.set()
+        with handle_lock:
+            restore_finished.set()
 
     def _handle_result(self, result, receiver, other_worker=False, timeout=None, interval=0.5, on_interval=None,
                        propagate=True, disable_sync_subtasks=False):

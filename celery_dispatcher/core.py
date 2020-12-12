@@ -1,11 +1,11 @@
+import pickle
 import threading
 import time
-
 from datetime import timedelta
-from functools import wraps, update_wrapper, partial
-from queue import PriorityQueue, Full, Empty
+from functools import partial, update_wrapper, wraps
+from queue import Empty, Full, PriorityQueue
 from threading import Lock
-from typing import Iterator, Generator
+from typing import Generator, Iterator
 
 from celery import _state, current_app, current_task, group
 from celery.exceptions import TimeoutError as CeleryTimeoutError
@@ -14,9 +14,9 @@ from celery.utils.abstract import CallableSignature, CallableTask
 
 from .backends import DEFAULT_BACKEND
 from .mixins import LoggerMixin
-from .states import PROGRESS
 from .signals import subtask_success
-from .utils import gen_chunk, total_size, is_uuid_format
+from .states import PROGRESS
+from .utils import gen_chunk, is_uuid_format, total_size
 
 
 class TaskThread(threading.Thread):
@@ -148,7 +148,7 @@ class dispatch(LoggerMixin, threading.local):
         self._result_backend = current_app.conf.get('dispatcher_result_backend')
         self._batch_size = current_app.conf.get('dispatcher_batch_size', 1000)
         self._poll_size = current_app.conf.get('dispatcher_poll_size', 1000)
-        self._subtask_timeout = current_app.conf.get('dispatcher_subtask_timeout', 60*60)
+        self._subtask_timeout = current_app.conf.get('dispatcher_subtask_timeout', 60 * 60)
         self._result_expires = current_app.conf.get('result_expires')
         if isinstance(self._result_expires, timedelta):
             self._result_expires = self._result_expires.total_seconds()
@@ -168,7 +168,8 @@ class dispatch(LoggerMixin, threading.local):
             update_wrapper(self, task)
             origin_call = self.__call__
             self.__call__ = partial(origin_call, self)
-            self.__call__ = wraps(origin_call)(self.__call__)  # partial miss to copy some attributes from the original function
+            # partial miss to copy some attributes from the original function
+            self.__call__ = wraps(origin_call)(self.__call__)
         else:
             self._wrapped_directly = False
             self._wrapper = self._create_task_wrapper(*args, **kwargs)
@@ -248,7 +249,7 @@ class dispatch(LoggerMixin, threading.local):
         for results in gen_chunk(self._apply_tasks(tasks, **options), self._batch_size):
             self.logger.debug('%s tasks have been applied', len(results))
             progress_manager.update_progress_total(len(results))
-            self._backend.bulk_push(self._dispatch_key, map(lambda r: r.task_id, results), self._result_expires)
+            self._backend.bulk_push(self._dispatch_key, map(pickle.dumps, results), self._result_expires)
 
         time.sleep(0)
         stash_finished.set()
@@ -261,8 +262,7 @@ class dispatch(LoggerMixin, threading.local):
                 options = common_options.copy()
                 options.update(task_options)
                 result = task.apply_async(args=args, kwargs=kwargs, producer=producer, add_to_parent=False, **options)
-                task_id = result.task_id
-                self.logger.debug('Task %s applied', task_id)
+                self.logger.debug('Task %s applied', result.task_id)
                 yield result
 
     def _parse_task_info(self, task_info):
@@ -311,27 +311,30 @@ class dispatch(LoggerMixin, threading.local):
 
                 timeout = self._subtask_timeout if restore_finished.is_set() else 1
                 try:
-                    self._handle_result(result, receiver, timeout=timeout)
+                    self._handle_result(result, receiver, timeout=timeout, propagate=True)
                 except CeleryTimeoutError:
                     if restore_finished.is_set():
-                        self.logger.debug('Results timeout expired, task_id: %s', result.task_id)
+                        self.logger.debug('Subtask timeout, task_id: %s', result.task_id)
                         self._progress_manager.update_progress_completed()
                     else:
-                        result_queue.put((priority+10, result))
+                        result_queue.put((priority + 10, result))
+                except Exception:
+                    self.logger.debug('Subtask raised exception, task_id: %s', result.task_id)
+                    self._progress_manager.update_progress_completed()
 
         self.logger.info('Finished collecting')
 
     def _restore_subtask_results(self, stash_finished, restore_finished, handle_lock, result_queue, interval=0.5):
         while True:
-            task_id = self._backend.pop(self._dispatch_key)
-            if not task_id:
+            result = self._backend.pop(self._dispatch_key)
+            if not result:
                 if stash_finished.is_set():
                     break
 
                 time.sleep(interval)
                 continue
 
-            result = current_app.AsyncResult(task_id.decode('utf-8'))
+            result = pickle.loads(result)
 
             while True:
                 try:

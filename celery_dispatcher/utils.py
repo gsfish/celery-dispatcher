@@ -1,7 +1,7 @@
 import re
 from collections import deque
+from itertools import chain, islice
 from reprlib import repr
-from itertools import islice, chain
 from sys import getsizeof, stderr
 
 REGEX_UUID = r'[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}'

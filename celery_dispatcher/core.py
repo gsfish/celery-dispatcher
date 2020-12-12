@@ -311,7 +311,7 @@ class dispatch(LoggerMixin, threading.local):
 
                 timeout = self._subtask_timeout if restore_finished.is_set() else 1
                 try:
-                    self._handle_result(result, receiver, timeout=timeout, propagate=True)
+                    self._handle_result(result, receiver, timeout=timeout)
                 except CeleryTimeoutError:
                     if restore_finished.is_set():
                         self.logger.debug('Subtask timeout, task_id: %s', result.task_id)
@@ -349,7 +349,7 @@ class dispatch(LoggerMixin, threading.local):
         restore_finished.set()
 
     def _handle_result(self, result, receiver, other_worker=False, timeout=None, interval=0.5, on_interval=None,
-                       propagate=False, disable_sync_subtasks=False):
+                       propagate=True, disable_sync_subtasks=False):
         callback = partial(self._on_task_finished, receiver=receiver)
         self.logger.debug('Waiting for the result, task_id: %s, timeout: %s', result, timeout)
         if other_worker:

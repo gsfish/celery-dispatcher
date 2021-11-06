@@ -12,7 +12,7 @@ pip install celery-dispatcher
 
 > NOTICE: `celery-dispatcher` use tls to store running info, so the pool implementation using coroutines(like eventlet/gevent) can not be used
 
-Fistly, yield subtask and its parameters in tuple from the main task by following order:
+Firstly, yield subtask and its parameters in tuple from the main task by following order:
 
 1. `task`: signature
 2. `args`: tupple/list

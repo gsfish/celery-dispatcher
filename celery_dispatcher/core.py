@@ -236,7 +236,7 @@ class dispatch(LoggerMixin, threading.local):
         # results = group(task for task in tasks)(**options)
         # self._handle_result(results, self.receive_result)
 
-        self.logger.info('Start dispatching')
+        self.logger.debug('Start dispatching')
 
         stash_thread = TaskThread(
             target=self._stash_subtask_results,
@@ -253,7 +253,7 @@ class dispatch(LoggerMixin, threading.local):
 
         time.sleep(0)
         stash_finished.set()
-        self.logger.info('Finished dispatching')
+        self.logger.debug('Finished dispatching')
 
     def _apply_tasks(self, tasks, **common_options) -> Iterator[AsyncResult]:
         with current_app.producer_or_acquire() as producer:
@@ -288,7 +288,7 @@ class dispatch(LoggerMixin, threading.local):
         return task, args, kwargs, options
 
     def _collect_from_task(self, stash_finished, receiver):
-        self.logger.info('Start collecting')
+        self.logger.debug('Start collecting')
 
         restore_finished = threading.Event()
         handle_lock = Lock()
@@ -322,7 +322,7 @@ class dispatch(LoggerMixin, threading.local):
                     self.logger.debug('Subtask raised exception, task_id: %s', result.task_id)
                     self._progress_manager.update_progress_completed()
 
-        self.logger.info('Finished collecting')
+        self.logger.debug('Finished collecting')
 
     def _restore_subtask_results(self, stash_finished, restore_finished, handle_lock, result_queue, interval=0.5):
         while True:

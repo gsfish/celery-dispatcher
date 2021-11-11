@@ -149,6 +149,8 @@ class dispatch(LoggerMixin, threading.local):
         self._batch_size = current_app.conf.get('dispatcher_batch_size', 1000)
         self._poll_size = current_app.conf.get('dispatcher_poll_size', 1000)
         self._subtask_timeout = current_app.conf.get('dispatcher_subtask_timeout', 60 * 60)
+        self._failure_on_subtask_timeout = current_app.conf.get('dispatcher_failure_on_subtask_timeout', False)
+        self._failure_on_subtask_exception = current_app.conf.get('dispatcher_failure_on_subtask_exception', False)
         self._result_expires = current_app.conf.get('result_expires')
         if isinstance(self._result_expires, timedelta):
             self._result_expires = self._result_expires.total_seconds()
@@ -312,14 +314,20 @@ class dispatch(LoggerMixin, threading.local):
                 timeout = self._subtask_timeout if restore_finished.is_set() else 1
                 try:
                     self._handle_result(result, receiver, timeout=timeout)
-                except CeleryTimeoutError:
+                except CeleryTimeoutError as err:
                     if restore_finished.is_set():
-                        self.logger.debug('Subtask timeout, task_id: %s', result.task_id)
+                        self.logger.error('Subtask timeout, task_id: %s', result.task_id)
+                        if self._failure_on_subtask_timeout:
+                            raise err
+
                         self._progress_manager.update_progress_completed()
                     else:
                         result_queue.put((priority + 10, result))
-                except Exception:
-                    self.logger.debug('Subtask raised exception, task_id: %s', result.task_id)
+                except Exception as err:
+                    self.logger.error('Subtask raised exception, task_id: %s', result.task_id)
+                    if self._failure_on_subtask_exception:
+                        raise err
+
                     self._progress_manager.update_progress_completed()
 
         self.logger.debug('Finished collecting')

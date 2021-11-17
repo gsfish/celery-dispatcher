@@ -148,6 +148,7 @@ class dispatch(LoggerMixin, threading.local):
         self._result_backend = current_app.conf.get('dispatcher_result_backend')
         self._batch_size = current_app.conf.get('dispatcher_batch_size', 1000)
         self._poll_size = current_app.conf.get('dispatcher_poll_size', 1000)
+        self._poll_timeout = current_app.conf.get('dispatcher_poll_timeout', 1)
         self._subtask_timeout = current_app.conf.get('dispatcher_subtask_timeout', 60 * 60)
         self._failure_on_subtask_timeout = current_app.conf.get('dispatcher_failure_on_subtask_timeout', False)
         self._failure_on_subtask_exception = current_app.conf.get('dispatcher_failure_on_subtask_exception', False)
@@ -311,7 +312,7 @@ class dispatch(LoggerMixin, threading.local):
                 except Empty:
                     continue
 
-                timeout = self._subtask_timeout if restore_finished.is_set() else 1
+                timeout = self._subtask_timeout if restore_finished.is_set() else self._poll_timeout
                 try:
                     self._handle_result(result, receiver, timeout=timeout)
                 except CeleryTimeoutError as err:

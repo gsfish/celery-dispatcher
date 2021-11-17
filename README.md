@@ -92,11 +92,29 @@ Default: 1000
 
 The queue size of subtasks in result retrieving. `celery-dispatcher` put the unfinished subtasks into a queue, polling it continuously for completion of subtasks.
 
+### dispatcher_poll_timeout
+
+Default: 1
+
+The default timeout for polling subtasks.
+
 ### dispatcher_subtask_timeout
 
 Default: 3600
 
 The default timeout in seconds before `celery-dispatcher` gives up retrieving the result of each subtask.
+
+### dispatcher_failure_on_subtask_timeout
+
+Default: False
+
+Whether raise exception when subtask timeout.
+
+### dispatcher_failure_on_subtask_exception
+
+Default: False
+
+Whether raise exception from subtask.
 
 ### dispatcher_progress_update_frequency
 

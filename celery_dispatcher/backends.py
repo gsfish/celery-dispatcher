@@ -29,5 +29,8 @@ class RedisBackend:
     def pop(self, key):
         return self.conn.rpop(key)
 
+    def delete(self, key):
+        return self.conn.delete(key)
+
 
 DEFAULT_BACKEND = RedisBackend

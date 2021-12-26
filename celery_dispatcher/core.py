@@ -249,6 +249,7 @@ class dispatch(LoggerMixin, threading.local):
         self.logger.debug('Dispatching subtasks: %r, options: %r', tasks, options)
 
     def _stash_subtask_results(self, progress_manager, stash_finished, tasks, **options):
+        self._backend.delete(self._dispatch_key)
         for results in gen_chunk(self._apply_tasks(tasks, **options), self._batch_size):
             self.logger.debug('%s tasks have been applied', len(results))
             progress_manager.update_progress_total(len(results))

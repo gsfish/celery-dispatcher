@@ -1,6 +1,7 @@
 import pickle
 import threading
 import time
+import traceback
 from datetime import timedelta
 from functools import partial, update_wrapper, wraps
 from queue import Empty, Full, PriorityQueue
@@ -327,6 +328,7 @@ class dispatch(LoggerMixin, threading.local):
                         result_queue.put((priority + 10, result))
                 except Exception as err:
                     self.logger.error('Subtask raised exception, task_id: %s', result.task_id)
+                    self.logger.error(traceback.format_exc())
                     if self._failure_on_subtask_exception:
                         raise err
 

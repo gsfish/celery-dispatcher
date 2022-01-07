@@ -292,7 +292,7 @@ class dispatch(LoggerMixin, threading.local):
 
         return task, args, kwargs, options
 
-    def _collect_from_task(self, stash_finished, receiver):
+    def _collect_from_task(self, stash_finished, receiver, interval=0.5):
         self.logger.debug('Start collecting')
 
         restore_finished = threading.Event()
@@ -307,6 +307,8 @@ class dispatch(LoggerMixin, threading.local):
         while True:
             if result_queue.empty() and restore_finished.is_set():
                 break
+            elif not result_queue.full():
+                time.sleep(interval)
 
             with handle_lock:
                 try:
@@ -325,7 +327,7 @@ class dispatch(LoggerMixin, threading.local):
 
                         self._progress_manager.update_progress_completed()
                     else:
-                        result_queue.put((priority + 10, result))
+                        result_queue.put((priority + self._poll_timeout * 2, result))
                 except Exception as err:
                     self.logger.error('Subtask raised exception, task_id: %s', result.task_id)
                     self.logger.error(traceback.format_exc())

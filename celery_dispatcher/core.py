@@ -4,8 +4,7 @@ import time
 import traceback
 from datetime import timedelta
 from functools import partial, update_wrapper, wraps
-from queue import Empty, Full, PriorityQueue
-from threading import Lock
+from queue import Empty, PriorityQueue
 from typing import Generator, Iterator
 
 from celery import _state, current_app, current_task, group
@@ -73,15 +72,21 @@ class ProgressManager(LoggerMixin):
         self._total_count = 0
         self._total_last_update_count = 0
 
-    def update_progress_completed(self, amount: int = 1):
+    def update_progress_completed(self, amount: int = 1, callback=None):
         with self._lock:
             self._completed_count += amount
             self._update_progress(self._completed_count, self._total_count, self._progress_update_frequency)
 
-    def update_progress_total(self, amount: int = 1):
+        if callback:
+            callback()
+
+    def update_progress_total(self, amount: int = 1, callback=None):
         with self._lock:
             self._total_count += amount
             self._update_progress(self._completed_count, self._total_count, self._progress_update_frequency)
+
+        if callback:
+            callback()
 
     def _update_progress(self, completed_count=None, total_count=None, update_frequency=1):
         """
@@ -256,7 +261,6 @@ class dispatch(LoggerMixin, threading.local):
             progress_manager.update_progress_total(len(results))
             self._backend.bulk_push(self._dispatch_key, map(pickle.dumps, results), self._result_expires)
 
-        time.sleep(0)
         stash_finished.set()
         self.logger.debug('Finished dispatching')
 
@@ -292,80 +296,73 @@ class dispatch(LoggerMixin, threading.local):
 
         return task, args, kwargs, options
 
-    def _collect_from_task(self, stash_finished, receiver, interval=0.5):
+    def _collect_from_task(self, stash_finished, receiver):
         self.logger.debug('Start collecting')
 
         restore_finished = threading.Event()
-        handle_lock = Lock()
+        free_count = threading.Semaphore(self._poll_size)
         result_queue = PriorityQueue(self._poll_size)
 
         restore_thread = TaskThread(
             target=self._restore_subtask_results,
-            args=(stash_finished, restore_finished, handle_lock, result_queue))
+            args=(stash_finished, restore_finished, free_count, result_queue))
         restore_thread.start()
 
         while True:
-            if result_queue.empty() and restore_finished.is_set():
-                break
-            elif not result_queue.full():
-                time.sleep(interval)
+            try:
+                priority, result = result_queue.get(timeout=self._poll_timeout)
+                # self.logger.debug('while collecting, get result from result_queue, priority: %s, qsize: %d', time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(priority)), result_queue.qsize())
+            except Empty:
+                if restore_finished.is_set():
+                    break
 
-            with handle_lock:
-                try:
-                    priority, result = result_queue.get(False)
-                except Empty:
-                    continue
+                continue
 
-                timeout = self._subtask_timeout if restore_finished.is_set() else self._poll_timeout
-                try:
-                    self._handle_result(result, receiver, timeout=timeout)
-                except CeleryTimeoutError as err:
-                    if restore_finished.is_set():
-                        self.logger.error('Subtask timeout, task_id: %s', result.task_id)
-                        if self._failure_on_subtask_timeout:
-                            raise err
-
-                        self._progress_manager.update_progress_completed()
-                    else:
-                        result_queue.put((priority + self._poll_timeout * 2, result))
-                except Exception as err:
-                    self.logger.error('Subtask raised exception, task_id: %s', result.task_id)
-                    self.logger.error(traceback.format_exc())
-                    if self._failure_on_subtask_exception:
+            timeout = self._subtask_timeout if restore_finished.is_set() else self._poll_timeout
+            try:
+                self._handle_result(result, receiver, timeout=timeout, on_finish=free_count.release)
+            except CeleryTimeoutError as err:
+                if restore_finished.is_set():
+                    self.logger.error('Subtask timeout, task_id: %s', result.task_id)
+                    if self._failure_on_subtask_timeout:
                         raise err
 
-                    self._progress_manager.update_progress_completed()
+                    self._progress_manager.update_progress_completed(callback=free_count.release)
+                else:
+                    priority += self._poll_timeout
+                    result_queue.put((priority, result))
+                    # self.logger.debug('while collecting, put result to result_queue, priority: %s, qsize: %d', time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(priority)), result_queue.qsize())
+            except Exception as err:
+                self.logger.error('Subtask raised exception, task_id: %s', result.task_id)
+                self.logger.error(traceback.format_exc())
+                if self._failure_on_subtask_exception:
+                    raise err
+
+                self._progress_manager.update_progress_completed(callback=free_count.release)
 
         self.logger.debug('Finished collecting')
 
-    def _restore_subtask_results(self, stash_finished, restore_finished, handle_lock, result_queue, interval=0.5):
+    def _restore_subtask_results(self, stash_finished, restore_finished, free_count, result_queue):
         while True:
             result = self._backend.pop(self._dispatch_key)
             if not result:
                 if stash_finished.is_set():
                     break
 
-                time.sleep(interval)
+                time.sleep(self._poll_timeout)
                 continue
 
+            priority = time.time()
             result = pickle.loads(result)
+            free_count.acquire()
+            result_queue.put((priority, result))
+            # self.logger.debug('while restoring, put result to result_queue, priority: %s, qsize: %d, free_count: %d', time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(priority)), result_queue.qsize(), free_count._value)
 
-            while True:
-                try:
-                    with handle_lock:
-                        result_queue.put((time.time(), result), False)
-                except Full:
-                    time.sleep(interval)
-                    continue
-                else:
-                    break
-
-        with handle_lock:
-            restore_finished.set()
+        restore_finished.set()
 
     def _handle_result(self, result, receiver, other_worker=False, timeout=None, interval=0.5, on_interval=None,
-                       propagate=True, disable_sync_subtasks=False):
-        callback = partial(self._on_task_finished, receiver=receiver)
+                       propagate=True, disable_sync_subtasks=False, on_finish=None):
+        callback = partial(self._on_task_finished, receiver=receiver, callback=on_finish)
         self.logger.debug('Waiting for the result, task_id: %s, timeout: %s', result, timeout)
         if other_worker:
             self.logger.debug('Task is not ready on other worker, task_id: %s', result.task_id)
@@ -401,7 +398,7 @@ class dispatch(LoggerMixin, threading.local):
                 raise TimeoutError('Failed to wait for the result, task_id: %s', result.task_id)
             time.sleep(interval)
 
-    def _on_task_finished(self, task_id, value, receiver):
+    def _on_task_finished(self, task_id, value, receiver, callback=None):
         if isinstance(value, Exception):
             self.logger.error('Failed to save result, task_id: %s', task_id, exc_info=value)
 
@@ -430,7 +427,7 @@ class dispatch(LoggerMixin, threading.local):
                 except Exception as exc:
                     self.logger.exception('Failed to save result, task_id: %s', task_id)
 
-        self._progress_manager.update_progress_completed()
+        self._progress_manager.update_progress_completed(callback=callback)
 
     def _is_groupresult_meta(self, value):
         # get this result when result serializer is `json`

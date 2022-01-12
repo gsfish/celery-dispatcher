@@ -318,11 +318,17 @@ class dispatch(LoggerMixin, threading.local):
 
                 continue
 
-            timeout = self._subtask_timeout if restore_finished.is_set() else self._poll_timeout
+            if restore_finished.is_set():
+                timeout = self._subtask_timeout
+                handle_timeout_result = True
+            else:
+                timeout = self._poll_timeout
+                handle_timeout_result = False
+
             try:
                 self._handle_result(result, receiver, timeout=timeout, on_finish=free_count.release)
             except CeleryTimeoutError as err:
-                if restore_finished.is_set():
+                if handle_timeout_result:
                     self.logger.error('Subtask timeout, task_id: %s', result.task_id)
                     if self._failure_on_subtask_timeout:
                         raise err

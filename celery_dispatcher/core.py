@@ -153,17 +153,11 @@ class PrioritizedItem:
         self.priority = priority
         self.item = item
 
-    def __eq__(self, other):
-        if not isinstance(other, __class__):
-            return NotImplemented
-
-        return self.priority == other.priority
-
     def __lt__(self, other):
-        if not isinstance(other, __class__):
-            return NotImplemented
-
         return self.priority < other.priority
+
+    def __eq__(self, other):
+        return self.priority == other.priority
 
 
 class dispatch(LoggerMixin, threading.local):

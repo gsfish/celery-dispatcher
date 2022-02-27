@@ -3,7 +3,7 @@ import threading
 import time
 import traceback
 from datetime import timedelta
-from functools import partial, update_wrapper, wraps
+from functools import partial, total_ordering, update_wrapper, wraps
 from queue import Empty, PriorityQueue
 from typing import Generator, Iterator
 
@@ -145,6 +145,25 @@ class ProgressManager(LoggerMixin):
             return 100, 0
 
         return completion_display, time_remaining
+
+
+@total_ordering
+class PrioritizedItem:
+    def __init__(self, priority, item):
+        self.priority = priority
+        self.item = item
+
+    def __eq__(self, other):
+        if not isinstance(other, __class__):
+            return NotImplemented
+
+        return self.priority == other.priority
+
+    def __lt__(self, other):
+        if not isinstance(other, __class__):
+            return NotImplemented
+
+        return self.priority < other.priority
 
 
 class dispatch(LoggerMixin, threading.local):
@@ -310,7 +329,9 @@ class dispatch(LoggerMixin, threading.local):
 
         while True:
             try:
-                priority, result = result_queue.get(timeout=self._poll_timeout)
+                result_item = result_queue.get(timeout=self._poll_timeout)
+                priority = result_item.priority
+                result = result_item.item
                 # self.logger.debug('while collecting, get result from result_queue, priority: %s, qsize: %d', time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(priority)), result_queue.qsize())
             except Empty:
                 if restore_finished.is_set():
@@ -336,7 +357,8 @@ class dispatch(LoggerMixin, threading.local):
                     self._progress_manager.update_progress_completed(callback=free_count.release)
                 else:
                     priority += self._poll_timeout
-                    result_queue.put((priority, result))
+                    result_item = PrioritizedItem(priority, result)
+                    result_queue.put(result_item)
                     # self.logger.debug('while collecting, put result to result_queue, priority: %s, qsize: %d', time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(priority)), result_queue.qsize())
             except Exception as err:
                 self.logger.error('Subtask raised exception, task_id: %s', result.task_id)
@@ -360,8 +382,10 @@ class dispatch(LoggerMixin, threading.local):
 
             priority = time.time()
             result = pickle.loads(result)
+            result_item = PrioritizedItem(priority, result)
+
             free_count.acquire()
-            result_queue.put((priority, result))
+            result_queue.put(result_item)
             # self.logger.debug('while restoring, put result to result_queue, priority: %s, qsize: %d, free_count: %d', time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(priority)), result_queue.qsize(), free_count._value)
 
         restore_finished.set()

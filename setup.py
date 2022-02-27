@@ -5,7 +5,7 @@ with open('README.md', 'r') as fh:
 
 setuptools.setup(
     name='celery-dispatcher',
-    version='1.0.10',
+    version='1.0.11',
     author='gsfish',
     author_email='root@grassfish.net',
     description='An extension for celery to dispatch large amount of subtasks within a main task',

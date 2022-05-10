@@ -271,7 +271,7 @@ class dispatch(LoggerMixin, threading.local):
     def _stash_subtask_results(self, progress_manager, stash_finished, tasks, **options):
         self._backend.delete(self._dispatch_key)
         for results in gen_chunk(self._apply_tasks(tasks, **options), self._batch_size):
-            self.logger.debug('%s tasks have been applied', len(results))
+            self.logger.debug('%s subtasks have been applied', len(results))
             progress_manager.update_progress_total(len(results))
             self._backend.bulk_push(self._dispatch_key, map(pickle.dumps, results), self._result_expires)
 
@@ -285,7 +285,7 @@ class dispatch(LoggerMixin, threading.local):
                 options = common_options.copy()
                 options.update(task_options)
                 result = task.apply_async(args=args, kwargs=kwargs, producer=producer, add_to_parent=False, **options)
-                self.logger.debug('Task %s applied', result.task_id)
+                self.logger.debug('Subtask %s applied', result.task_id)
                 yield result
 
     def _parse_task_info(self, task_info):
@@ -328,8 +328,8 @@ class dispatch(LoggerMixin, threading.local):
                 timestamp = result_item.timestamp
                 priority = result_item.priority
                 result = result_item.item
-                self.logger.debug('During collecting, get result_item from result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d',
-                                  result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(priority)), timestamp, result_queue.qsize())
+                self.logger.debug('During collecting, get result_item from result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free_count: %d',
+                                  result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(priority)), timestamp, result_queue.qsize(), free_count._value)
             except Empty:
                 if restore_finished.is_set():
                     break
@@ -355,8 +355,8 @@ class dispatch(LoggerMixin, threading.local):
                 else:
                     result_item.priority += self._poll_timeout
                     result_queue.put(result_item)
-                    self.logger.debug('During collecting, put result_item back to result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d',
-                                      result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(result_item.priority)), timestamp, result_queue.qsize())
+                    self.logger.debug('During collecting, put result_item back to result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free_count: %d',
+                                      result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(result_item.priority)), timestamp, result_queue.qsize(), free_count._value)
             except Exception as err:
                 self.logger.error('Subtask raised exception, subtask_id: %s', result.task_id)
                 self.logger.error(traceback.format_exc())
@@ -391,9 +391,9 @@ class dispatch(LoggerMixin, threading.local):
     def _handle_result(self, result, receiver, other_worker=False, timeout=None, interval=0.5, on_interval=None,
                        propagate=True, disable_sync_subtasks=False, on_finish=None):
         callback = partial(self._on_task_finished, receiver=receiver, callback=on_finish)
-        self.logger.debug('Waiting for the result, task_id: %s, timeout: %s', result, timeout)
+        self.logger.debug('Waiting for the result, subtask_id: %s, timeout: %s', result.task_id, timeout)
         if other_worker:
-            self.logger.debug('Task is not ready on other worker, task_id: %s', result.task_id)
+            self.logger.debug('Result is not ready on other worker, subtask_id: %s', result.task_id)
             self._wait_until_ready(result, timeout)
 
         if isinstance(result, AsyncResult):
@@ -420,30 +420,30 @@ class dispatch(LoggerMixin, threading.local):
 
     def _wait_until_ready(self, result, timeout=None, interval=0.5):
         time_start = time.monotonic()
-        self.logger.debug('Waiting for the task, task_id: %s, timeout: %s', result.task_id, timeout)
+        self.logger.debug('Waiting for the subtask, subtask_id: %s, timeout: %s', result.task_id, timeout)
         while not result.ready():
             if timeout and (time.monotonic() - time_start >= timeout):
-                raise TimeoutError('Failed to wait for the result, task_id: %s', result.task_id)
+                raise TimeoutError('Failed to wait for the result, subtask_id: %s', result.task_id)
             time.sleep(interval)
 
     def _on_task_finished(self, task_id, value, receiver, callback=None):
         if isinstance(value, Exception):
-            self.logger.error('Failed to save result, task_id: %s', task_id, exc_info=value)
+            self.logger.error('Failed to save result, subtask_id: %s', task_id, exc_info=value)
 
         elif isinstance(value, GroupResult):
-            self.logger.debug('Received GroupResult, task_id: %s', task_id)
+            self.logger.debug('Received GroupResult, subtask_id: %s', task_id)
             self._progress_manager.update_progress_total(len(value))
             self._handle_result(value, receiver=receiver)
 
         elif self._is_groupresult_meta(value):
-            self.logger.debug('Received GroupResult META, task_id: %s', task_id)
+            self.logger.debug('Received GroupResult META, subtask_id: %s', task_id)
             for results in gen_chunk(self._gen_result_from_groupresult_meta(value), self._batch_size):
                 self._progress_manager.update_progress_total(len(results))
                 for result in results:
                     self._handle_result(result, receiver=receiver, other_worker=True)
 
         else:
-            self.logger.debug('Received common result, task_id: %s, size: %d bytes', task_id, total_size(value))
+            self.logger.debug('Received common result, subtask_id: %s, size: %d bytes', task_id, total_size(value))
 
             root_id = current_task.request.root_id
             if subtask_success.receivers:
@@ -453,7 +453,7 @@ class dispatch(LoggerMixin, threading.local):
                 try:
                     receiver(root_id=root_id, task_id=task_id, retval=value)
                 except Exception as exc:
-                    self.logger.exception('Failed to save result, task_id: %s', task_id)
+                    self.logger.exception('Failed to save result, subtask_id: %s', task_id)
 
         self._progress_manager.update_progress_completed(callback=callback)
 

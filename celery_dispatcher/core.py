@@ -166,8 +166,8 @@ class dispatch(LoggerMixin, threading.local):
     def __init__(self, *args, **kwargs):
         # initialize configuration
         self._result_backend = current_app.conf.get('dispatcher_result_backend')
-        self._batch_size = current_app.conf.get('dispatcher_batch_size', 1000)
-        self._poll_size = current_app.conf.get('dispatcher_poll_size', 1000)
+        self._batch_size = current_app.conf.get('dispatcher_batch_size', 100)
+        self._poll_size = current_app.conf.get('dispatcher_poll_size', 100)
         self._poll_timeout = current_app.conf.get('dispatcher_poll_timeout', 1)
         self._subtask_timeout = current_app.conf.get('dispatcher_subtask_timeout', 60 * 60)
         self._failure_on_subtask_timeout = current_app.conf.get('dispatcher_failure_on_subtask_timeout', False)

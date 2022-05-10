@@ -107,7 +107,7 @@ class ProgressManager(LoggerMixin):
             return
         # Store progress for display
         progress_percent, time_remaining = self._calc_progress(completed_count, total_count)
-        self.logger.debug("Updating progress: %s percent, %s remaining", progress_percent, time_remaining)
+        self.logger.debug('Updating progress: %s percent, %s remaining', progress_percent, time_remaining)
         if current_task.request.id:
             self._completed_last_update_count = completed_count
             self._total_last_update_count = total_count
@@ -129,7 +129,7 @@ class ProgressManager(LoggerMixin):
         """
         current_time = time.time()
         time_spent = current_time - self._start_time
-        self.logger.debug("Progress time spent: %s", time_spent)
+        self.logger.debug('Progress time spent: %s', time_spent)
 
         if total_count == 0:
             return 100, 0
@@ -150,6 +150,7 @@ class ProgressManager(LoggerMixin):
 @total_ordering
 class PrioritizedItem:
     def __init__(self, priority, item):
+        self.timestamp = int(time.time())
         self.priority = priority
         self.item = item
 
@@ -324,9 +325,11 @@ class dispatch(LoggerMixin, threading.local):
         while True:
             try:
                 result_item = result_queue.get(timeout=self._poll_timeout)
+                timestamp = result_item.timestamp
                 priority = result_item.priority
                 result = result_item.item
-                # self.logger.debug('while collecting, get result from result_queue, priority: %s, qsize: %d', time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(priority)), result_queue.qsize())
+                self.logger.debug('During collecting, get result_item from result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d',
+                                  result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(priority)), timestamp, result_queue.qsize())
             except Empty:
                 if restore_finished.is_set():
                     break
@@ -343,19 +346,19 @@ class dispatch(LoggerMixin, threading.local):
             try:
                 self._handle_result(result, receiver, timeout=timeout, on_finish=free_count.release)
             except CeleryTimeoutError as err:
-                if handle_timeout_result:
-                    self.logger.error('Subtask timeout, task_id: %s', result.task_id)
+                if handle_timeout_result or (time.time() - timestamp) >= self._subtask_timeout:
+                    self.logger.error('Subtask timeout, subtask_id: %s', result.task_id)
                     if self._failure_on_subtask_timeout:
                         raise err
 
                     self._progress_manager.update_progress_completed(callback=free_count.release)
                 else:
-                    priority += self._poll_timeout
-                    result_item = PrioritizedItem(priority, result)
+                    result_item.priority += self._poll_timeout
                     result_queue.put(result_item)
-                    # self.logger.debug('while collecting, put result to result_queue, priority: %s, qsize: %d', time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(priority)), result_queue.qsize())
+                    self.logger.debug('During collecting, put result_item back to result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d',
+                                      result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(result_item.priority)), timestamp, result_queue.qsize())
             except Exception as err:
-                self.logger.error('Subtask raised exception, task_id: %s', result.task_id)
+                self.logger.error('Subtask raised exception, subtask_id: %s', result.task_id)
                 self.logger.error(traceback.format_exc())
                 if self._failure_on_subtask_exception:
                     raise err
@@ -380,7 +383,8 @@ class dispatch(LoggerMixin, threading.local):
 
             free_count.acquire()
             result_queue.put(result_item)
-            # self.logger.debug('while restoring, put result to result_queue, priority: %s, qsize: %d, free_count: %d', time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(priority)), result_queue.qsize(), free_count._value)
+            self.logger.debug('During restoring, put result to result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free_count: %d',
+                              result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(priority)), result_item.timestamp, result_queue.qsize(), free_count._value)
 
         restore_finished.set()
 

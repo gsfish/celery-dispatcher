@@ -7,6 +7,7 @@ from functools import partial, total_ordering, update_wrapper, wraps
 from queue import Empty, PriorityQueue
 from typing import Generator, Iterator
 
+from billiard.exceptions import SoftTimeLimitExceeded
 from celery import _state, current_app, current_task, group
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from celery.result import AsyncResult, GroupResult, ResultSet
@@ -210,17 +211,22 @@ class dispatch(LoggerMixin, threading.local):
         def wrapper(task):
             @wraps(task)
             def wrapped_task(*args, **kwargs):
-                # start dispatching
-                gen_task = task(*args, **kwargs)
-                if not isinstance(gen_task, Generator):
-                    raise RuntimeError('Task should be generator: {0!r}'.format(task))
+                try:
+                    gen_task = task(*args, **kwargs)
+                    if not isinstance(gen_task, Generator):
+                        raise RuntimeError('Task should be generator: {0!r}'.format(task))
 
-                self._progress_manager.init_progress()
-                stash_finished = threading.Event()
+                    self._progress_manager.init_progress()
+                    stash_finished = threading.Event()
+                    restore_finished = threading.Event()
+                    result_queue = PriorityQueue(self._poll_size)
+                    result_queue_free = threading.Semaphore(self._poll_size)
 
-                self._dispatch_from_task(stash_finished, gen_task, **options)
-                # start collecting
-                self._collect_from_task(stash_finished, receiver)
+                    self._dispatch_from_task(stash_finished, gen_task, **options)
+                    self._collect_from_task(stash_finished, restore_finished, result_queue, result_queue_free, receiver)
+                except SoftTimeLimitExceeded as err:
+                    self._revoke_from_task(stash_finished, restore_finished, result_queue, result_queue_free)
+                    raise err
 
             return wrapped_task
 
@@ -259,16 +265,15 @@ class dispatch(LoggerMixin, threading.local):
         # results = group(task for task in tasks)(**options)
         # self._handle_result(results, self.receive_result)
 
-        self.logger.debug('Start dispatching')
-
+        self.logger.debug('Dispatching subtasks: %r, options: %r', tasks, options)
         stash_thread = TaskThread(
             target=self._stash_subtask_results,
             args=(self._progress_manager, stash_finished, tasks,),
             kwargs=options)
         stash_thread.start()
-        self.logger.debug('Dispatching subtasks: %r, options: %r', tasks, options)
 
     def _stash_subtask_results(self, progress_manager, stash_finished, tasks, **options):
+        self.logger.debug('Stashing started')
         self._backend.delete(self._dispatch_key)
         for results in gen_chunk(self._apply_tasks(tasks, **options), self._batch_size):
             self.logger.debug('%s subtasks have been applied', len(results))
@@ -276,7 +281,7 @@ class dispatch(LoggerMixin, threading.local):
             self._backend.bulk_push(self._dispatch_key, map(pickle.dumps, results), self._result_expires)
 
         stash_finished.set()
-        self.logger.debug('Finished dispatching')
+        self.logger.debug('Stashing finished')
 
     def _apply_tasks(self, tasks, **common_options) -> Iterator[AsyncResult]:
         with current_app.producer_or_acquire() as producer:
@@ -310,16 +315,11 @@ class dispatch(LoggerMixin, threading.local):
 
         return task, args, kwargs, options
 
-    def _collect_from_task(self, stash_finished, receiver):
-        self.logger.debug('Start collecting')
-
-        restore_finished = threading.Event()
-        free_count = threading.Semaphore(self._poll_size)
-        result_queue = PriorityQueue(self._poll_size)
-
+    def _collect_from_task(self, stash_finished, restore_finished, result_queue, result_queue_free, receiver):
+        self.logger.debug('Collecting started')
         restore_thread = TaskThread(
             target=self._restore_subtask_results,
-            args=(stash_finished, restore_finished, free_count, result_queue))
+            args=(stash_finished, restore_finished, result_queue, result_queue_free))
         restore_thread.start()
 
         while True:
@@ -328,8 +328,10 @@ class dispatch(LoggerMixin, threading.local):
                 timestamp = result_item.timestamp
                 priority = result_item.priority
                 result = result_item.item
-                self.logger.debug('During collecting, get result_item from result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free_count: %d',
-                                  result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(priority)), timestamp, result_queue.qsize(), free_count._value)
+                self.logger.debug(
+                    'During collecting, get result_item from result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free: %d',
+                    result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(priority)), timestamp,
+                    result_queue.qsize(), result_queue_free._value)
             except Empty:
                 if restore_finished.is_set():
                     break
@@ -344,30 +346,40 @@ class dispatch(LoggerMixin, threading.local):
                 handle_timeout_result = False
 
             try:
-                self._handle_result(result, receiver, timeout=timeout, on_finish=free_count.release)
+                self._handle_result(result, receiver, timeout=timeout, on_finish=result_queue_free.release)
+            except SoftTimeLimitExceeded as err:
+                result_queue.put(result_item)
+                self.logger.debug(
+                    'During collecting, put result_item back to result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free: %d',
+                    result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(result_item.priority)), timestamp,
+                    result_queue.qsize(), result_queue_free._value)
+                raise err
             except CeleryTimeoutError as err:
                 if handle_timeout_result or (time.time() - timestamp) >= self._subtask_timeout:
                     self.logger.error('Subtask timeout, subtask_id: %s', result.task_id)
                     if self._failure_on_subtask_timeout:
                         raise err
 
-                    self._progress_manager.update_progress_completed(callback=free_count.release)
+                    self._progress_manager.update_progress_completed(callback=result_queue_free.release)
                 else:
                     result_item.priority += self._poll_timeout
                     result_queue.put(result_item)
-                    self.logger.debug('During collecting, put result_item back to result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free_count: %d',
-                                      result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(result_item.priority)), timestamp, result_queue.qsize(), free_count._value)
+                    self.logger.debug(
+                        'During collecting, put result_item back to result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free: %d',
+                        result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(result_item.priority)), timestamp,
+                        result_queue.qsize(), result_queue_free._value)
             except Exception as err:
                 self.logger.error('Subtask raised exception, subtask_id: %s', result.task_id)
                 self.logger.error(traceback.format_exc())
                 if self._failure_on_subtask_exception:
                     raise err
 
-                self._progress_manager.update_progress_completed(callback=free_count.release)
+                self._progress_manager.update_progress_completed(callback=result_queue_free.release)
 
-        self.logger.debug('Finished collecting')
+        self.logger.debug('Collecting finished')
 
-    def _restore_subtask_results(self, stash_finished, restore_finished, free_count, result_queue):
+    def _restore_subtask_results(self, stash_finished, restore_finished, result_queue, result_queue_free):
+        self.logger.debug('Restoring started')
         while True:
             result = self._backend.pop(self._dispatch_key)
             if not result:
@@ -381,12 +393,15 @@ class dispatch(LoggerMixin, threading.local):
             result = pickle.loads(result)
             result_item = PrioritizedItem(priority, result)
 
-            free_count.acquire()
+            result_queue_free.acquire()
             result_queue.put(result_item)
-            self.logger.debug('During restoring, put result to result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free_count: %d',
-                              result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(priority)), result_item.timestamp, result_queue.qsize(), free_count._value)
+            self.logger.debug(
+                'During restoring, put result to result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free: %d',
+                result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(priority)), result_item.timestamp,
+                result_queue.qsize(), result_queue_free._value)
 
         restore_finished.set()
+        self.logger.debug('Restoring finished')
 
     def _handle_result(self, result, receiver, other_worker=False, timeout=None, interval=0.5, on_interval=None,
                        propagate=True, disable_sync_subtasks=False, on_finish=None):
@@ -472,3 +487,33 @@ class dispatch(LoggerMixin, threading.local):
             task_id = task_meta[0][0]
             result = current_app.AsyncResult(task_id)
             yield result
+
+    def _revoke_from_task(self, stash_finished, restore_finished, result_queue, result_queue_free):
+        self.logger.debug('Revoking started')
+        while True:
+            try:
+                result_item = result_queue.get(timeout=self._poll_timeout)
+                timestamp = result_item.timestamp
+                priority = result_item.priority
+                result = result_item.item
+                self.logger.debug(
+                    'During revoking, get result_item from result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free: %d',
+                    result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(priority)), timestamp,
+                    result_queue.qsize(), result_queue_free._value)
+            except Empty:
+                if stash_finished.is_set() and restore_finished.is_set():
+                    break
+
+                continue
+
+            self._revoke_chain(result)
+            result_queue_free.release()
+            self.logger.debug('Subtask revoked, subtask_id: %s', result.task_id)
+
+        self.logger.debug('Revoking finished')
+
+    def _revoke_chain(self, last_result):
+        self.logger.debug('Revoking %s', last_result.task_id)
+        last_result.revoke(terminate=True)
+        if last_result.parent is not None:
+            self._revoke_chain(last_result.parent)

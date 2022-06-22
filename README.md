@@ -61,6 +61,27 @@ def calc():
         yield sqrt, (i,)
 ```
 
+If you want to revoke all subtasks, call revoke with specific signal:
+
+```
+import signal
+from celery import shared_task
+from celery_dispatcher import dispatch
+
+@shared_task
+def subtask(i):
+    ...
+
+@dispatch
+@shared_task
+def maintask():
+    for i in range(10):
+        yield subtask, (i,)
+
+result = maintask.delay()
+result.revoke(terminate=True, signal=signal.SIGUSR1)
+```
+
 ## Options
 
 The `dispatch` accepts the following parameters:

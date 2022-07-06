@@ -103,19 +103,19 @@ The backend used to store subtask info. Can be one of the following:
 
 ### dispatcher_batch_size
 
-Default: 1000
+Default: 100
 
 The batch size of subtask dispatching, or the result retrieving.
 
 ### dispatcher_poll_size
 
-Default: 1000
+Default: 100
 
 The queue size of subtasks in result retrieving. `celery-dispatcher` put the unfinished subtasks into a queue, polling it continuously for completion of subtasks.
 
 ### dispatcher_poll_timeout
 
-Default: 1
+Default: 10
 
 The default timeout for polling subtasks.
 

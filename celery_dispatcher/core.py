@@ -12,7 +12,6 @@ from celery import _state, current_app, current_task, group
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from celery.result import AsyncResult, GroupResult, ResultSet
 from celery.utils.abstract import CallableSignature, CallableTask
-from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from .backends import DEFAULT_BACKEND
 from .mixins import LoggerMixin
@@ -369,11 +368,6 @@ class dispatch(LoggerMixin, threading.local):
                         'During collecting, put result_item back to result_queue, subtask_id: %s, priority: %s, timestamp: %d, qsize: %d, free: %d',
                         result.task_id, time.strftime('%Y%m%d%H%M%S', time.localtime(result_item.priority)), timestamp,
                         result_queue.qsize(), result_queue_free._value)
-            except RedisTimeoutError as err:
-                self.logger.error('During collecting, redis timeout error raised')
-                self.logger.error(traceback.format_exc())
-                result_item.priority += self._poll_timeout
-                result_queue.put(result_item)
             except Exception as err:
                 self.logger.error('Subtask raised exception, subtask_id: %s', result.task_id)
                 self.logger.error(traceback.format_exc())

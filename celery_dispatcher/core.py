@@ -290,7 +290,17 @@ class dispatch(LoggerMixin, threading.local):
                 options = common_options.copy()
                 options.update(task_options)
                 result = task.apply_async(args=args, kwargs=kwargs, producer=producer, add_to_parent=False, **options)
-                self.logger.debug('Subtask %s applied', result.task_id)
+                if result.parent:
+                    result_ids = []
+                    last_result = result
+                    while last_result:
+                        result_ids.append(last_result.id)
+                        last_result = last_result.parent
+
+                    self.logger.debug('Subtask applied by chain: %s', ' | '.join(result_ids[::-1]))
+                else:
+                    self.logger.debug('Subtask %s applied', result.task_id)
+
                 yield result
 
     def _parse_task_info(self, task_info):
